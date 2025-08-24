@@ -3,6 +3,9 @@ from Agent import *
 from env import *
 import os
 from ReplayMemory import ReplayMemory
+import sys 
+
+# sys.path.append('../DegScore')
 from Functions import *
 from tqdm import tqdm
 from Logger import *
@@ -18,6 +21,12 @@ import argparse
 #     raise ImportError("Please install apex from https://www.github.com/nvidia/apex to run this example.")
 
 import time
+
+#create dummy arnie config
+with open('arnie_file.txt','w+') as f:
+    f.write("linearpartition: . \nTMP: /tmp")
+    
+os.environ['ARNIEFILE'] = 'arnie_file.txt'
 
 t=time.time()
 
@@ -42,7 +51,7 @@ def get_args():
 
     parser.add_argument('--degradation_reward', action='store_true', help='use degradation reward or not')
     parser.add_argument('--fix_repeat_sites', action='store_true', help='fix repeat sites or not')
-
+    parser.add_argument('--degradation_model_weight_path', type=str, default='../data/degradation_model_w_loop', help='path to degradation model weights')
 
     parser.add_argument('--use_deberta_attention', action='store_true', help='use deberta self attention or not')
     parser.add_argument('--use_nt_input', action='store_true', help='use deberta self attention or not')
@@ -333,7 +342,7 @@ end=0
 #load degradation models
 if args.degradation_reward:
     #print("shit")
-    degradation_models=load_degradation_models(device,'../../degradation_model_w_loop')
+    degradation_models=load_degradation_models(device,args.degradation_model_weight_path)
     #exit()
 
 #codon_sequence=

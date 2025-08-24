@@ -22,7 +22,7 @@ import torchvision.transforms as T
 
 from RiboGraphViz import RGV
 
-sys.path.append('../DegScore')
+#sys.path.append('../DegScore')
 
 from DegScore import DegScore
 
