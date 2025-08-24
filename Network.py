@@ -488,6 +488,7 @@ class NucleicTransformer(nn.Module):
         self.new_head=new_head
         if self.new_head:
             self.output_layer2=nn.Linear(ninp,nclass)
+            self.output_layer3=nn.Linear(ninp,nclass)
 
         #self.sigmoid=nn.Sigmoid()
         self.return_aw=return_aw
@@ -515,11 +516,12 @@ class NucleicTransformer(nn.Module):
 
         if self.new_head:
             new_head_output=self.output_layer2(src)+self.cai_vector*self.cai_weight
+            new_head_output2=self.output_layer3(src)+self.cai_vector*self.cai_weight
         if self.new_head:
             if self.return_aw:
                 return output, new_head_output, attention_weights_layer
             else:
-                return output, new_head_output
+                return output, new_head_output, new_head_output2
         else:
             if self.return_aw:
                 return output, attention_weights_layer

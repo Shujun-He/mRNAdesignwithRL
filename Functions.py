@@ -8,6 +8,7 @@ from itertools import count
 from PIL import Image
 import os
 from multiprocessing import Pool
+import sys
 
 from tqdm import tqdm
 from Network import *
@@ -18,6 +19,13 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import torchvision.transforms as T
+
+from RiboGraphViz import RGV
+
+sys.path.append('../DegScore')
+
+from DegScore import DegScore
+
 
 def get_distance_mask(L):
 
@@ -232,13 +240,25 @@ def get_features(args):
     if bpp_only:
         structure=None
         loop=None
+        mld=0
     else:
         structure=get_structure([sequence,tmp_file,lf_path])
         loop=write_loop_assignments(structure)
+        rgv = RGV(structure)
+
+        rgv.calc_MLD()
+
+        mld=rgv.MLD
+
+        degscore = -DegScore(sequence, structure=structure).degscore_by_position
+
+
     features={'sequence':sequence,
              'bpp':bpp,
              'structure':structure,
-             'loop':loop}
+             'loop':loop,
+             'MLD':mld,
+             "degscore":degscore}
     # with open(f'features/{id}.p','wb+') as f:
     #     pickle.dump(features,f)
 

@@ -24,7 +24,7 @@ t=time.time()
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--gpu_id', type=str, default='0',  help='which gpu to use')
-    parser.add_argument('--pretrained_weight_path', type=str, default='.',  help='path to pretrained model weights')
+    parser.add_argument('--pretrained_weight_path', type=str, default='',  help='path to pretrained model weights')
     parser.add_argument('--memory_capacity', type=int, default=int(1e8), help='max number of memories to store')
     parser.add_argument('--episode_length', type=int, default=24, help='episode_length')
     parser.add_argument('--episodes', type=int, default=50, help='total number of episodes to run')
@@ -41,7 +41,11 @@ def get_args():
     parser.add_argument('--epochs_per_episode', type=int, default=1, help='epochs_per_episode')
 
     parser.add_argument('--degradation_reward', action='store_true', help='use degradation reward or not')
+    parser.add_argument('--fix_repeat_sites', action='store_true', help='fix repeat sites or not')
+
+
     parser.add_argument('--use_deberta_attention', action='store_true', help='use deberta self attention or not')
+    parser.add_argument('--use_nt_input', action='store_true', help='use deberta self attention or not')
     #parser.add_argument('--no_degradation_reward', action='store_false', help='use degradation reward or not')
     #parser.add_argument('--degradation_reward', action=argparse.BooleanOptionalAction)
     #parser.add_argument('--pretrained_weight_path', type=str, default='', help='pretrained_weight_path')
@@ -54,9 +58,13 @@ def get_args():
     parser.add_argument('--codon_table_path', type=str, default='', help='path of codon table')
     parser.add_argument('--codon_usage_table_path', type=str, default='', help='codon_usage_table_path')
     parser.add_argument('--fasta_file_path', type=str, default=' ', help='path of protein fasta file')
+    parser.add_argument('--custom_protein_mask', type=str, default='', help='path of custom protein mask')
     #parser.add_argument('--epochs', type=int, default=1, help='number of epochs to train per episode')
 
     parser.add_argument('--cai_weight', type=float, default=0, help='weight of cai during optimization')
+    parser.add_argument('--cai_metric_weight', type=float, default=0, help='weight of cai during best sequence selection')
+    parser.add_argument('--mld_metric_weight', type=float, default=0, help='weight of mld during best sequence selection')
+
     parser.add_argument('--degradation_weight', type=float, default=0.5, help='weight of cai during optimization')
     parser.add_argument('--optimization_direction', type=str, default='max', help='maximize of minimize structure')
     parser.add_argument('--target',type=float,default=0.6,help='absolute app target')
@@ -80,6 +88,8 @@ def get_args():
     return opts
 
 args=get_args()
+
+os.system('rm async_comm/*')
 
 # print(args.degradation_reward)
 # print(args.degradation_weight)
@@ -129,6 +139,80 @@ def CAI(sequence):
     cai=cai**(1/n_amino)
     return cai
 
+codon2aa={c:aa for c,aa in zip(cai_table['codon'],cai_table['amino_acid'])}
+
+aa2codons={}
+
+for aa in cai_table['amino_acid'].unique():
+    table=cai_table[cai_table['amino_acid']==aa].sort_values('relative_frequency',ascending=False)
+    values=table['codon'].to_list()
+    aa2codons[aa]=values
+
+#exit()
+
+def get_nucleotide_repeat_list():
+    return ['AAAAA', 'CCCC', 'GGGG', 'UUUU', 'TTTT']
+
+def check_restriction_sites(seq, restriction_sites):
+    """ Checks if the sequence contains any of the prohibited restriction sites.
+    If restriction site in seq: returns seq location of that site
+    else: returns -1 """
+    for x in restriction_sites:
+        if x in seq:
+            return seq.find(x)
+
+    return -1
+
+def check_nucleotide_repeat(seq):
+    """ Checks if there are any stretches of nucleotide repeats
+        of A, C, G and U """
+
+    nucleotide_repeat = get_nucleotide_repeat_list()
+
+    for repeat in nucleotide_repeat:
+        if repeat in seq:
+            return seq.find(repeat)
+
+    return -1
+
+def fix_repeat_sites(sequence):
+    repeat_exist=True
+    while repeat_exist:
+        position=check_nucleotide_repeat(sequence)
+        repeat_starting_position=(position)//3
+
+        current_codon_start=(position)//3*3
+        next_codon_start= (position+3)//3*3
+
+        #print(f"Fixing {sequence[position:position+5]} at position {position}")
+        #print(sequence[position:position+5])
+        #print(next_codon_start)
+        #print(sequence[next_codon_start:next_codon_start+3])
+
+        if position==current_codon_start or (position-current_codon_start)>=(next_codon_start+3-position):
+            codon2change=current_codon_start//3
+        else:
+            codon2change=next_codon_start//3
+
+        codon=sequence[codon2change*3:codon2change*3+3]
+        aa=codon2aa[codon]
+        #print(codon)
+        #codon
+        np.random.shuffle(aa2codons[aa])
+        for alternative_codon in aa2codons[aa]:
+            new_sequence=sequence[:codon2change*3]+alternative_codon+sequence[codon2change*3+3:]
+            #print(new_sequence[:position+5])
+            if check_nucleotide_repeat(new_sequence[position:position+5])==-1:
+                #print(new_sequence[position:position+5])
+                sequence=new_sequence
+                break
+        #cai,protein_sequence=CAI(sequence)
+        #assert reference_protein_sequence==protein_sequence
+
+
+        if position==-1:
+            repeat_exist=False
+    return sequence
 
 # print(codon_table)
 # print(cai_table)
@@ -143,10 +227,12 @@ for codon,amino_acid in zip(codon_table.Codon,codon_table.Letter):
 
 
 with open(args.fasta_file_path,'r') as f:
-    protein_sequence=f.read().split('\n')[1]
+    protein_sequence=f.read().split('\n')[1].upper()#.replace('T','U')
 
-print(f"protein sequence: {protein_sequence}")
-print(f"sequence length: {len(protein_sequence)}")
+if args.use_nt_input:
+    protein_sequence=protein_sequence.replace('T','U')
+
+
 
 if args.optimization_direction=="target":
     print(f"targeting app of {args.target}")
@@ -168,7 +254,7 @@ end=len(UTR3)
 os.system('mkdir logs')
 os.system('mkdir models')
 os.system('mkdir async_comm')
-logger=CSVLogger(['episode','averaged_paired_probability','loss'],'logs/fintune_log.csv')
+logger=CSVLogger(['episode','metric','loss'],'logs/finetune_log.csv')
 
 #init stuff
 cai_vector=torch.tensor(cai_vector).to(device)
@@ -184,7 +270,8 @@ optimizer = Ranger(policy_net.parameters(), weight_decay=1e-1, lr=1e-4)
 opt_level = 'O1'
 #policy_net, optimizer = amp.initialize(policy_net, optimizer, opt_level=opt_level)
 
-weights=torch.load(args.pretrained_weight_path)
+if args.pretrained_weight_path != '':
+    weights=torch.load(args.pretrained_weight_path)
 
 # if args.data_parallel:
 #     policy_net=nn.DataParallel(policy_net)
@@ -192,16 +279,16 @@ weights=torch.load(args.pretrained_weight_path)
 #
 # #weights=torch.load('models/best_weights.ckpt')
 # else:
-new_weights={}
-for key in weights.keys():
-    if 'module.' in key:
-        new_weights[key[7:]]=weights[key]
-    else:
-        new_weights[key]=weights[key]
-weights=new_weights
+    new_weights={}
+    for key in weights.keys():
+        if 'module.' in key:
+            new_weights[key[7:]]=weights[key]
+        else:
+            new_weights[key]=weights[key]
+    weights=new_weights
 #
-policy_net.load_state_dict(weights,strict=False)
-target_net.load_state_dict(weights,strict=False)
+    policy_net.load_state_dict(weights,strict=False)
+    target_net.load_state_dict(weights,strict=False)
 
 # policy_net.load_state_dict(weights)
 # target_net.load_state_dict(weights)
@@ -217,8 +304,25 @@ memory_folder='finetune_memory', EPS_START = args.EPS_START, EPS_END = args.EPS_
 degradation_reward=args.degradation_reward,degradation_weight=args.degradation_weight,epochs_per_episode=args.epochs_per_episode)
 env=RNAstructure()
 
+if args.use_nt_input:
+    #protein_sequence=agent.codon2int(protein_sequence)
+    init_rna_sequence=protein_sequence
+    tmp=''
+    for i in range(len(protein_sequence)//3):
+        tmp+= codon2aa[protein_sequence[i*3:(i+1)*3]]
+    protein_sequence=tmp
+else:
+    init_rna_sequence=agent.protein2nt(protein_sequence)
 
-init_rna_sequence=agent.protein2nt(protein_sequence)
+
+
+# print(protein_sequence)
+# exit()
+
+print(f"protein sequence: {protein_sequence}")
+print(f"sequence length: {len(protein_sequence)}")
+
+
 start=0
 end=0
 #init_rna_sequence=UTR5+init_rna_sequence+UTR3
@@ -245,8 +349,10 @@ for i in range(args.reps_per):
     # protein_sequence=''
     # for integer in int_protein_sequence:
     #     protein_sequence+=protein_letters[integer]
-    init_rna_sequence=agent.protein2nt(protein_sequence)
-    protein_mask=agent.get_protein_mask(init_rna_sequence,start,end)
+    if args.custom_protein_mask!='':
+        protein_mask=np.load(args.custom_protein_mask)
+    else:
+        protein_mask=agent.get_protein_mask(init_rna_sequence,start,end)
     testing_sequences.append({'protein_sequence':protein_sequence,'sequence':init_rna_sequence,'protein_mask':protein_mask})
 
 #exit()
@@ -256,11 +362,26 @@ p = Pool(processes=args.MAX_THRE)
 with open('finetune_sequences.p','wb+') as f:
     pickle.dump(testing_sequences,f)
 best_metric=-1000000
+# episode=np.linspace(np.pi/2,0,args.episodes)
+# weights=np.cos(episode)
+# print(weights)
 for ep in range(args.episodes):
-    # int_protein_sequence=np.random.randint(20,size=seq_length)
-    # protein_sequence=''
-    # for integer in int_protein_sequence:
-    #     protein_sequence+=protein_letters[integer]
+    agent.degradation_weight=0+(ep)/(args.episodes+1)*args.degradation_weight
+    #agent.degradation_weight=weights[ep]
+    print(f"deg weight: agent.degradation_weight")
+    if ep>0:
+        wait=True
+        while wait:
+            print("waiting for training")
+            try:
+                agent.target_net.load_state_dict(torch.load("async_comm/trained_weights.bin"))
+                agent.policy_net.load_state_dict(torch.load("async_comm/trained_weights.bin"))
+                print("Trained weights loaded")
+                wait=False
+            except:
+                print("No training has occured so no weights to load")
+
+
     print('###running episodes###')
     sequences=[]
     masks=[]
@@ -275,6 +396,10 @@ for ep in range(args.episodes):
         for step in range(args.episode_length-1):
             #print(len(current_rna_sequence))
             next_rna_sequence=agent.select_action(current_rna_sequence,protein_mask,start,end)
+
+            if args.fix_repeat_sites:
+                next_rna_sequence=fix_repeat_sites(next_rna_sequence)
+
             masks.append(protein_mask)
             sequences.append(next_rna_sequence)
             current_rna_sequence=next_rna_sequence
@@ -342,6 +467,12 @@ for ep in range(args.episodes):
             next_ap=results[i+1+j*args.episode_length]["bpp"].sum(1)
             prev_ap=results[i+j*args.episode_length]["bpp"].sum(1)
             protein_mask=masks[i+j*args.episode_length]
+            #if args.degradation_reward:
+            current_mld=results[i+j*args.episode_length]["MLD"]
+            next_mld=results[i+1+j*args.episode_length]["MLD"]
+
+            current_degscore=results[i+j*args.episode_length]["degscore"]
+            next_degscore=results[i+1+j*args.episode_length]["degscore"]
             mean_ap=next_ap.mean()
             if args.degradation_reward:
                 prev_degradation=degradation[i+j*args.episode_length]
@@ -349,11 +480,15 @@ for ep in range(args.episodes):
                 reward=(np.exp(next_ap*2)-np.exp(prev_ap*2)).reshape(-1,3).mean(1)
                 degradation_reward=(next_degradation-prev_degradation).reshape(-1,3).mean(1)
 
+
+                degscore_reward=(next_degscore-current_degscore).reshape(-1,3).mean(1)
                 # print(reward.shape)
                 # print(degradation_reward.shape)
 
                 mean_degradation=next_degradation.mean()
-                metric=mean_ap+mean_degradation*args.degradation_weight
+                mean_degscore=next_degscore.mean()
+                #metric=mean_ap+mean_degradation*args.degradation_weight
+                metric=mean_ap+args.degradation_weight*(mean_degradation+mean_degscore)
             else:
                 degradation_reward=1
                 if args.optimization_direction=='target':
@@ -375,6 +510,7 @@ for ep in range(args.episodes):
                               torch.tensor([next_protein_sequence]),
                               torch.tensor([reward]),
                               torch.tensor([degradation_reward]),
+                              torch.tensor([degscore_reward]),
                               torch.tensor([protein_mask]))
             # filename=f'memory/transition{0}.p'
             # with open(filename,'rb') as f:
@@ -383,13 +519,16 @@ for ep in range(args.episodes):
             # mean_ap=next_ap.mean()
             # metric=mean_ap
             cai=CAI(next_rna_sequence)
-            metric=metric+args.cai_weight*cai
+            metric=metric+args.cai_metric_weight*cai+args.mld_metric_weight*next_mld/len(next_rna_sequence)
 
             if metric>best_metric:
                 with open('best_sequence.txt','w+') as f:
                     f.write(f'ap: {next_ap.mean()}\n')
+                    f.write(f'CAI: {cai}\n')
                     if args.degradation_reward:
                         f.write(f'mean_degradation: {mean_degradation}\n')
+                        f.write(f'mean_degscore: {mean_degscore}\n')
+                        f.write(f"MLD: {next_mld}\n")
                         structure=results[i+1+j*args.episode_length]['structure']
                         loop=results[i+1+j*args.episode_length]['loop']
                         f.write(f'structure: {structure}\n')
@@ -416,24 +555,39 @@ for ep in range(args.episodes):
     if (ep+1)%args.batch_size_update_epoch==0:
         args.batch_size*=2
         args.batch_size=int(np.clip(args.batch_size,0,args.max_batch_size))
+
+    df=pd.read_csv("logs/finetune_log.csv")
+
     if (ep+1)%args.reduce_k_epoch==0:
+    # if (ep+1)>args.reduce_k_epoch:
+    #     if (metric-df.metric.values[-args.reduce_k_epoch])<1e-5:
         #agent.memory.position=0
+            #print(f"reducing k and gamma after plateuing for {args.reduce_k_epoch} episodes")
         agent.k=int(agent.k//2)
         agent.gamma=max(0,agent.gamma-args.gamma_reduce)
         # args.reps_per=int(args.reps_per*1.5)
         # args.episode_length=int(args.episode_length/1.5)
         #batch_size=int(np.clip(batch_size,0,max_batch_size))
     with open("async_comm/state.json",'w+') as f:
-        state={"k":agent.k,"gamma":agent.gamma,"position":agent.memory.position,"done":False}
+        state={"k":agent.k,
+        "gamma":agent.gamma,
+        "position":agent.memory.position,
+        "degradation_weight":agent.degradation_weight,
+        "done":False}
         json.dump(state,f)
     #exit()
 #state_action_values, next_state_batch=agent.optimize_model(10,5)
 
 with open("async_comm/state.json",'w+') as f:
-    state={"k":agent.k,"gamma":agent.gamma,"position":agent.memory.position,"done":True}
+    state={"k":agent.k,
+    "gamma":agent.gamma,
+    "position":agent.memory.position,
+    "degradation_weight":agent.degradation_weight,
+    "done":True}
     json.dump(state,f)
-
-p.close()
+    #exit()
+#state_action_values, next_state_batch=agent.optimize_model(10,5)
+#p.close()
 
 with open('finetune.txt','w+') as f:
     f.write(f'Tota wall time: {time.time()-t}')

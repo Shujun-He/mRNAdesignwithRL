@@ -82,7 +82,7 @@ class RNAAgent():
             #eps_threshold=0
             self.steps_done += 1
         else:
-            eps_threshold = 0.95
+            eps_threshold = 0
 
 
         if sample > eps_threshold:
@@ -98,12 +98,13 @@ class RNAAgent():
             with torch.no_grad():
                 #output=self.policy_net(encoding.unsqueeze(0)).squeeze()+protein_mask
                 if self.degradation_reward:
-                    output,output2=self.policy_net(encoding.unsqueeze(0))
+                    output,output2,output3=self.policy_net(encoding.unsqueeze(0))
                     output=output.squeeze()
                     output2=output2.squeeze()
-                    output=output+protein_mask
-                    output2=output2+protein_mask
-                    output=output+output2*self.degradation_weight
+                    output3=output3.squeeze()
+                    # output=output+protein_mask
+                    # output2=output2+protein_mask
+                    output=output+output2*self.degradation_weight+output3*self.degradation_weight+protein_mask
                 else:
                     output=self.policy_net(encoding.unsqueeze(0)).squeeze()+protein_mask
 
@@ -133,7 +134,7 @@ class RNAAgent():
             return state[:start]+self.int2codon(new_encoding)+state[len(state)-end:len(state)]
         else:
             sequence_length=len(state)
-            return state[:start]+self.codon_random_mutation(state[start:sequence_length-end])+state[sequence_length-end:len(state)]
+            return state[:start]+self.codon_random_mutation(state[start:sequence_length-end],protein_mask)+state[sequence_length-end:len(state)]
             #return state
 
     def int2codon(self,sequence):
@@ -161,20 +162,28 @@ class RNAAgent():
             int_sequence=np.pad(int_sequence,(0,target_length-len(int_sequence)),constant_values=-1)
         return int_sequence
 
-    def codon_random_mutation(self,rna_sequence):
+    def codon_random_mutation(self,rna_sequence,protein_mask):
         new_sequence=''
         positions=np.random.choice(len(rna_sequence)//3,self.k)
         for i in range(len(rna_sequence)//3):
             codon=rna_sequence[i*3:(i+1)*3]
+            protein_index=np.where(protein_mask[i]>-1)[0]
             if i in positions:
             #if np.random.uniform() < p:
-                protein_index=np.where(self.protein_codon_table==codon)[0]
-                protein_letter=self.protein_letter_table[protein_index]
-                codon_indices=np.where(self.protein_letter_table==protein_letter)
-                index=np.random.choice(codon_indices[0])
+
+                # print(protein_index)
+                # exit()
+                #protein_letter=self.protein_letter_table[protein_index]
+                #codon_indices=np.where(self.protein_letter_table==protein_letter)
+                index=np.random.choice(protein_index)
                 new_sequence+=self.protein_codon_table[index]
+                #new_sequence+=codon
+            elif len(protein_index)==1:
+                new_sequence+=self.protein_codon_table[protein_index[0]]
             else:
                 new_sequence+=codon
+            #new_sequence+=codon
+        #assert "ACCAAGUCGACACGGAUGAGUGUUUCCUUCUAUCCGCGUCAUUGUUAGGCCUUACGUACCGAUAGACCACUGGUGCAAAUAGAGAGCUAU" in new_sequence
         return new_sequence
 
     def protein2nt(self,sequence):
@@ -209,16 +218,18 @@ class RNAAgent():
         steps=len(self.memory.memory)//batch_size
         #protein_mask=torch.Tensor(protein_mask).to(self.device).float()
         #protein_mask=protein_mask.expand(batch_size,*protein_mask.shape)
-        self.policy_net.train()
+        self.policy_net.eval()
         total_loss=0
         if self.memory.position>self.memory_capacity:
             memoyr_start_position=self.memory.position-self.memory_capacity
         else:
             memoyr_start_position=0
         dataset=RNADataset(self.memory.position,self.memory.memory_folder,memoyr_start_position)
-        dataloader=DataLoader(dataset,batch_size=batch_size,num_workers=1,drop_last=True)
+        #dataloader=DataLoader(dataset,batch_size=batch_size,num_workers=1,drop_last=True,shuffle=True)
+        dataloader=DataLoader(dataset,batch_size=batch_size,num_workers=1,drop_last=True,shuffle=False)
         print('###optimizing model###')
         for epoch in range(self.epochs_per_episode):
+            step=1
             for batch in tqdm(dataloader):
 
                 state_batch = batch.current_sequence.to(self.device).long().squeeze(1)
@@ -227,26 +238,33 @@ class RNAAgent():
                 next_state_output_batch = batch.next_protein_sequence.to(self.device).long().squeeze(1)
                 reward_batch = batch.reward.to(self.device).float().squeeze(1)
                 degradation_reward_batch = batch.degradation_reward.to(self.device).float().squeeze(1)
+                degscore_reward_batch = batch.degscore_reward.to(self.device).float().squeeze(1)
                 protein_mask = batch.protein_mask.to(self.device).float().squeeze(1)
 
 
                 if self.degradation_reward:
                     state_action_values = self.policy_net(state_output_batch)
 
-                    bpp_action_values, degradation_action_values=state_action_values[0].gather(-1,next_state_output_batch.unsqueeze(-1)),\
-                                                                 state_action_values[1].gather(-1,next_state_output_batch.unsqueeze(-1))
+                    bpp_action_values, degradation_action_values, degscore_action_values=state_action_values[0].gather(-1,next_state_output_batch.unsqueeze(-1)),\
+                                                                 state_action_values[1].gather(-1,next_state_output_batch.unsqueeze(-1)), \
+                                                                 state_action_values[2].gather(-1,next_state_output_batch.unsqueeze(-1)),
                     #bpp_action_value=bpp_action_values+protein_mask
                     #degradation_action_values=degradation_action_values+protein_mask
 
-                    next_state_values_full = self.target_net(next_state_output_batch)
+                    with torch.no_grad():
+                        next_state_values_full = self.target_net(next_state_output_batch)
 
                     next_bpp_action_values, next_degradation_action_values=next_state_values_full[0].gather(-1,next_state_output_batch.unsqueeze(-1)),\
                                                                  next_state_values_full[1].gather(-1,next_state_output_batch.unsqueeze(-1))
 
+                    next_degscore_action_values=next_state_values_full[2].gather(-1,next_state_output_batch.unsqueeze(-1))
 
-                    action_next_state_values_full=self.policy_net(next_state_output_batch)
+                    action_next_state_values_full=next_state_values_full
 
-                    action_next_state_values_combined=action_next_state_values_full[0]+self.degradation_weight*action_next_state_values_full[1]+protein_mask
+                    action_next_state_values_combined=action_next_state_values_full[0]+\
+                                                      self.degradation_weight*action_next_state_values_full[1]+\
+                                                      self.degradation_weight*action_next_state_values_full[2]+\
+                                                      protein_mask
 
                     max_next_values, max_next_value_indices = action_next_state_values_combined.max(-1)
 
@@ -258,55 +276,37 @@ class RNAAgent():
 
                     top_indices=top_indices+start//3
 
-                    # print(max_next_value_indices)
-                    # print(top_indices)
-                    # print(max_next_value_indices.shape)
-                    # print(top_indices.shape)
-                    # exit()
-
                     #values.gather(-1,indices1.unsqueeze(1)).squeeze(1).gather(-1,indices2).shape
 
                     top_next_bpp_action_values=next_state_values_full[0].gather(-1,max_next_value_indices.unsqueeze(1)).squeeze(1).gather(-1,top_indices)
-
-                    # print(top_next_bpp_action_values.shape)
-                    # exit()
-
                     next_bpp_action_values=next_bpp_action_values.squeeze(-1).scatter_(-1,top_indices,top_next_bpp_action_values.detach())
-
-                    # print(next_bpp_action_values.shape)
-                    # print(reward_batch.shape)
-                    # exit()
                     expected_bpp_state_action_values = (next_bpp_action_values * self.gamma) + reward_batch
-                    # print(bpp_action_values)
-                    # print(expected_bpp_state_action_values)
-                    # exit()
                     loss = F.mse_loss(bpp_action_values, expected_bpp_state_action_values.unsqueeze(-1))
 
-                    #print(loss)
 
-                    #print(bpp_action_values.shape)
-                    #print(expected_bpp_state_action_values.shape)
-                    #exit()
 
                     top_next_degradation_action_values=next_state_values_full[1].gather(-1,max_next_value_indices.unsqueeze(1)).squeeze(1).gather(-1,top_indices)
                     next_degradation_action_values=next_degradation_action_values.squeeze(-1).scatter_(-1,top_indices,top_next_degradation_action_values.detach())
                     expected_degradation_state_action_values = (next_degradation_action_values * self.gamma) + degradation_reward_batch
                     loss += F.mse_loss(degradation_action_values, expected_degradation_state_action_values.unsqueeze(-1))*self.degradation_weight
-                    # print(next_bpp_action_values.shape)
-                    # exit()
 
-                    #next_state_values = next_state_values_full.gather(-1,next_state_output_batch.unsqueeze(-1)).squeeze(-1)
+                    top_next_degscore_action_values=next_state_values_full[2].gather(-1,max_next_value_indices.unsqueeze(1)).squeeze(1).gather(-1,top_indices)
+                    next_degscore_action_values=next_degscore_action_values.squeeze(-1).scatter_(-1,top_indices,top_next_degscore_action_values.detach())
+                    expected_degscore_state_action_values = (next_degscore_action_values * self.gamma) + degscore_reward_batch
+                    loss += F.mse_loss(degscore_action_values, expected_degscore_state_action_values.unsqueeze(-1))*self.degradation_weight
+
 
 
                 else:
                     state_action_values = self.policy_net(state_output_batch).gather(-1,next_state_output_batch.unsqueeze(-1))
-
-                    next_state_values_full = (self.target_net(next_state_output_batch)+protein_mask)
+                    
+                    with torch.no_grad():
+                        next_state_values_full = (self.target_net(next_state_output_batch)+protein_mask)
 
                     next_state_values = next_state_values_full.gather(-1,next_state_output_batch.unsqueeze(-1)).squeeze(-1)
 
 
-                    action_next_state_values_full=(self.policy_net(next_state_output_batch)+protein_mask)
+                    action_next_state_values_full= next_state_values_full #(self.policy_net(next_state_output_batch)+protein_mask)
 
                     max_next_values, max_next_value_indices = action_next_state_values_full.max(-1)
 
@@ -333,6 +333,10 @@ class RNAAgent():
                 self.optimizer.step()
                 if self.scheduler is not None:
                     self.scheduler.step()
+                    
+                if step%10==0:
+                    self.target_net.load_state_dict(self.policy_net.state_dict())
+                step+=1
                 # print(state_action_values.shape)
                 # exit()
                 #return state_action_values, next_state_batch

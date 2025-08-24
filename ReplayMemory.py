@@ -11,6 +11,7 @@ Transition = namedtuple('Transition',
                          'next_protein_sequence',
                          'reward',
                          'degradation_reward',
+                         'degscore_reward',
                          'protein_mask'))
 
 
